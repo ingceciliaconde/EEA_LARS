@@ -1,0 +1,492 @@
+---
+title: "Trabajo Práctico Nro.2: Aplicación y Análisis de Least Angle Regression (LARS)"
+subtitle: "Enfoque Estadístico del Aprendizaje"
+author: "Baldaseroni,Esteban; Conde, M. Cecilia, Lopez, Juan Jose"
+date: "10/12/2024"
+output:
+  html_document:
+    toc: true
+    code_folding: show
+    toc_float: true
+    df_print: paged
+    theme: flatly
+    code_download: true
+  pdf_document:
+    toc: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# 1. Configuraciones Generales de R
+
+```{r Configuracion General}
+require("knitr")
+knitr::opts_chunk$set(echo = TRUE)
+# indica desde dónde instalar paquetes
+options(repos = c(CRAN = "http://cran.rstudio.com")) 
+```
+
+```{r Configuracion General2, message=FALSE, warning=FALSE}
+# Seteo de directorio de trabajo
+setwd("C:/Users/mconde/Documents/EEA-Tps/LARS")
+
+```
+
+```{r Librerias, message=FALSE, warning=FALSE}
+#librerías
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(kableExtra)
+library(readxl)
+library(stats)
+library(BSDA)
+library(ggplot2)
+library(reshape2) #correlacion calor
+library(GGally)
+library(robustbase)
+library(knitr)
+library(lars) #especifica de lars
+library(caret) # ver para qu esirve
+library(glmnet) #modelo lasso
+library(corrplot)
+library(broom)
+library(cowplot)
+
+
+
+```
+
+# 2. Lectura de Datos y armado de dataset de análisis.
+
+En esta investigación, se utilizará LARS para seleccionar las variables relevantes en el modelo de emisiones de CO2 de países latinoamericanos, comparándolo con otros métodos como el Lasso. LARS fue elegido por su eficacia en la selección de variables en datasets con alta dimensionalidad y posibles colinealidades entre variables.
+
+Se utilizará un dataset disponible públicamente de Kaggle “[Agri-food CO2 emission dataset - Forecast](https://www.kaggle.com/datasets/alessandrolobello/agri-food-co2-emission-dataset-forecasting-ml)” que contiene múltiples variables relevantes para el análisis
+provenientes de la fusión de datos de Food and Agriculture Organization (FAO) y el Intergovernmental Panel of Climate Change (IPCC), desde el
+año 1990 hasta el 2020, para diferentes países del mundo.
+
+El dataset se encuentra limpio y preprocesado, por lo que se filtrarán los países relevantes para nuestro estudio. A continuación se procederá con un breve análisis exploratorio y además, se normalizarán los datos para asegurar que todas las variables estén en la misma escala.
+
+**Estructura del dataset orginal**: El dataset consta de 6965 filas y 31 columnas. Incluye diversas variables que permiten realizar análisis detallados sobre las emisiones de CO2 y su relación con el sector
+agroalimentario.
+
+```{r Lectura de datos}
+#Leer datos
+df<-read.csv("Agrofood_co2_emission.csv")
+names(df)[31] <- "Average.Temperature"
+```
+
+```{r Paises de sudamerica}
+# Crear un vector con los países de Sudamérica
+paises_sudamerica <- c("Argentina", "Bolivia", "Brazil", "Chile", "Colombia", 
+                       "Ecuador", "Guyana", "Paraguay", "Peru", "Suriname", 
+                       "Uruguay", "Venezuela")
+
+# Ver la lista de países
+print(paises_sudamerica)
+```
+
+```{r Dataset de analisis}
+# Filtrar el data frame por los países de Sudamérica
+df_sudamerica <- df %>% 
+  filter(Area %in% paises_sudamerica)
+head(df_sudamerica)
+```
+
+# 3. EDA
+
+Estructura de dataset del estudio: Se incluye los paises de sudamerica
+reducionedo la cantidad de registros a 310.
+
+```{r}
+# Resumen estadístico de las variables numéricas:
+summary(df_sudamerica)
+
+#Dimensiones del dataset (filas y columnas):
+dim(df_sudamerica)
+```
+
+```{r}
+# Verificar datos faltantes
+missing_data <- sapply(df_sudamerica, function(x) sum(is.na(x)))
+print(missing_data)
+```
+```{r}
+# Filtrar registros donde cualquier columna tiene NA,
+df_con_na <- df_sudamerica %>%
+  filter(if_any(everything(), is.na))
+head(df_con_na)
+```
+
+```{r}
+# Gráfico de barras para visualizar el total de emisión
+ggplot(df_sudamerica, aes(x = Area, y = total_emission, fill = Area)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Emision de Gases", 
+       x = "Paises", 
+       y = "Emision Total") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## 3.1 Correlograma
+```{r}
+# Ajustar las opciones gráficas
+par(mar = c(2, 2, 2, 2) + 0.5)  # Ajusta los márgenes (inferior, izquierdo, superior, derecho)
+
+# Análisis de variables numéricas
+num_vars <- df_sudamerica %>% select(where(is.numeric))
+cor_matrix <- cor(num_vars, use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.cex = 0.4, # Tamaño del texto
+         tl.col = "black", # Color del texto
+         addCoef.col = "black", # Mostrar coeficientes de correlación
+         number.cex = 0.3) # Tamaño de los coeficientes
+```
+
+# 4. Modelos 
+
+## 4.1 Preparacion de data set
+
+### 4.1.1 Escalado
+```{r}
+data <- df_sudamerica %>% 
+  select(where(is.numeric))%>% 
+  select(-Fires.in.organic.soils,-On.farm.energy.use) #La saque porque son todos ceros
+head(data)
+```
+
+```{r}
+# Escalamos las variables númericas, menos la variable predictora
+data_scaled = data %>% mutate_at(vars(-total_emission), scale)
+head(data_scaled)
+```
+
+```{r Elimino Nulls}
+# Elimino registros nulos
+sum(is.na(data_scaled))
+data_scaled_na <- na.omit(data_scaled)
+```
+
+### 4.1.2 Dataset Train y Test
+
+```{r}
+# Definir 'y' como la columna de la variable objetivo
+y <- data_scaled_na[["total_emission"]]
+
+# Definir 'X' como una matriz de las variables predictoras
+X <- as.matrix(data_scaled_na[, -which(names(data_scaled_na) == "total_emission")])
+
+```
+
+```{r}
+# Dividir los datos en entrenamiento y prueba (70% entrenamiento, 30% prueba)
+set.seed(42)  # Para reproducibilidad
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X[trainIndex, ]
+y_train <- y[trainIndex]
+X_test <- X[-trainIndex, ]
+y_test <- y[-trainIndex]
+```
+
+
+## 4.2 Modelo LARS
+La función cv.lars en R realiza una validación cruzada para el modelo LARS (Least Angle Regression) o LASSO, dependiendo del tipo de ajuste
+seleccionado. En este caso, se utiliza con los parámetros type = "lar" y mode = "step".
+
+```{r}
+# Usando cv.lars sin el argumento index
+cv_lars=cv.lars(X_train,y_train, K = 10, trace = FALSE, plot.it = TRUE, se = TRUE, type = "lar", mode = "step", normalize = F)
+
+```
+
+El número óptimo de pasos podría ser entre 5 y 10, donde el MSE alcanza su valor más bajo y se estabiliza. Agregar más pasos después de este punto no aporta mejoras significativas al modelo y puede llevar a un modelo más complejo sin beneficios en el ajuste.
+
+### 4.2.1 Ajuste del Modelo
+
+```{r Modelo Lars}
+
+# Ahora ajustamos el modelo LARS 
+modelo_lars <- lars(X_train, y_train, type = "lar", normalize = F) # "lar" selecciona el tipo de regularización
+```
+
+
+```{r}
+# Evaluación del modelo
+# Visualizar los coeficientes a lo largo del proceso de ajuste
+plot(modelo_lars)
+title("Trayectoria de Coeficientes en LARS")
+```
+```{r}
+# Extraer coeficientes
+coeficientes_beta <- coef(modelo_lars)
+```
+
+```{r}
+
+coef_long <- melt(coeficientes_beta, id.vars = "step")
+
+# Asumiendo que tu dataframe en formato largo se llama coef_long
+variables_positivas_step_10 <- coef_long %>%
+  filter(Var1 == 10, value != 0) %>%
+  select(Var2)  # Selecciona solo las variables
+
+# Crear una lista de nombres de las variables
+variables_list <- unique(variables_positivas_step_10$Var2)  
+  
+# Filtrar coef_long para incluir solo las variables en variables_list
+datos_filtrados <- coef_long %>%
+  dplyr::filter(Var2 %in% variables_list)
+
+# Cargar ggplot2
+ggplot(datos_filtrados, aes(x = Var1, y = value, color = Var2)) +
+  geom_line(linewidth = 1) +  # Usar linewidth en lugar de size
+  labs(title = "Trayectoria de los Coeficientes a lo largo de los Pasos",
+       x = "Paso del Modelo LARS", 
+       y = "Valor del Coeficiente",
+       color = "Variable") +
+  theme_minimal() +
+  theme(legend.position = "right")  # Ajustar la posición de la leyenda
+
+
+```
+
+```{r}
+
+coef_long <- melt(coeficientes_beta, id.vars = "step")
+
+# Asumiendo que tu dataframe en formato largo se llama coef_long
+variables_positivas_step_5 <- coef_long %>%
+  filter(Var1 == 5, value != 0) %>%
+  select(Var2)  # Selecciona solo las variables
+
+# Crear una lista de nombres de las variables
+variables_list <- unique(variables_positivas_step_5$Var2)  
+  
+# Filtrar coef_long para incluir solo las variables en variables_list
+datos_filtrados <- coef_long %>%
+  dplyr::filter(Var2 %in% variables_list)
+
+# Cargar ggplot2
+ggplot(datos_filtrados, aes(x = Var1, y = value, color = Var2)) +
+  geom_line(linewidth = 1) +  # Usar linewidth en lugar de size
+  labs(title = "Trayectoria de los Coeficientes a lo largo de los Pasos",
+       x = "Paso del Modelo LARS", 
+       y = "Valor del Coeficiente",
+       color = "Variable") +
+  theme_minimal() +
+  theme(legend.position = "right")  # Ajustar la posición de la leyenda
+
+
+```
+
+
+### 4.4 Predicciones
+
+```{r}
+# Realizar predicciones en el conjunto de prueba
+y_pred <- predict(modelo_lars, X_test)
+```
+```{r}
+y_pred_lars_step1 <- y_pred$fit[, 1]   
+y_pred_lars_step2 <-y_pred$fit[, 2]   
+y_pred_lars_step3 <-y_pred$fit[, 3]   
+y_pred_lars_step4 <- y_pred$fit[, 4]
+y_pred_lars_step5 <- y_pred$fit[, 5]
+y_pred_lars_step6 <- y_pred$fit[, 6]
+y_pred_lars_step7 <- y_pred$fit[, 7]
+y_pred_lars_step8 <- y_pred$fit[, 8]
+y_pred_lars_step9 <- y_pred$fit[, 9]
+y_pred_lars_step10 <- y_pred$fit[, 10]
+y_pred_lars_step11 <- y_pred$fit[, 11]
+y_pred_lars_step12 <- y_pred$fit[, 12]
+y_pred_lars_step13 <- y_pred$fit[, 13]
+y_pred_lars_step14 <- y_pred$fit[, 14]
+y_pred_lars_step15 <- y_pred$fit[, 15]
+y_pred_lars_full <- y_pred$fit[, ncol(y_pred$fit)] # Extraer la tercer columna columna
+```
+
+```{r}
+# Evaluar el rendimiento del modelo utilizando MSE
+# Crear un vector con los nombres de los pasos
+steps <- c("Paso 1", "Paso 2", "Paso 3", "Paso 4", "Paso 5", "Paso 6", 
+           "Paso 7", "Paso 8", "Paso 9", "Paso 10", "Paso 11", "Paso 12", "Paso 13", "Paso 14","Paso 15","Modelo completo")
+
+# Calcular los valores de MSE para cada paso
+mse_values <- c(mean((y_test - y_pred_lars_step1)^2),
+                mean((y_test - y_pred_lars_step2)^2),
+                mean((y_test - y_pred_lars_step3)^2),
+                mean((y_test - y_pred_lars_step4)^2),
+                mean((y_test - y_pred_lars_step5)^2),
+                mean((y_test - y_pred_lars_step6)^2),
+                mean((y_test - y_pred_lars_step7)^2),
+                mean((y_test - y_pred_lars_step8)^2),
+                mean((y_test - y_pred_lars_step9)^2),
+                mean((y_test - y_pred_lars_step10)^2),
+                mean((y_test - y_pred_lars_step11)^2),
+                mean((y_test - y_pred_lars_step12)^2),
+                mean((y_test - y_pred_lars_step13)^2),
+                mean((y_test - y_pred_lars_step14)^2),
+                mean((y_test - y_pred_lars_step15)^2),
+                mean((y_test - y_pred_lars_full)^2))
+
+# Crear un data frame con los resultados
+table_mse <- data.frame(Paso = steps, MSE = mse_values)
+
+# Mostrar la tabla
+print(table_mse)
+
+```
+
+```{r}
+
+# Calcular el R²
+actual <- y_test  # Valores reales
+mean_actual <- mean(actual)  # Media de los valores reales
+
+# Calcular la suma de los errores cuadrados y la suma total de los cuadrados
+ss_residual <- sum((actual - y_pred_lars_step11)^2)  # Error cuadrático residual
+ss_total <- sum((actual - mean_actual)^2)  # Suma total de los cuadrados
+
+# Calcular R²
+r_squared <- 1 - (ss_residual / ss_total)
+print(paste("El R² es:", r_squared))
+```
+
+```{r}
+
+# Calcular el R²
+actual <- y_test  # Valores reales
+mean_actual <- mean(actual)  # Media de los valores reales
+
+# Calcular la suma de los errores cuadrados y la suma total de los cuadrados
+ss_residual <- sum((actual - y_pred_lars_step6)^2)  # Error cuadrático residual
+ss_total <- sum((actual - mean_actual)^2)  # Suma total de los cuadrados
+
+# Calcular R²
+r_squared <- 1 - (ss_residual / ss_total)
+print(paste("El R² es:", r_squared))
+```
+
+
+
+```{r}
+
+# Calcular el R²
+actual <- y_test  # Valores reales
+mean_actual <- mean(actual)  # Media de los valores reales
+
+# Calcular la suma de los errores cuadrados y la suma total de los cuadrados
+ss_residual <- sum((actual - y_pred_lars_step2)^2)  # Error cuadrático residual
+ss_total <- sum((actual - mean_actual)^2)  # Suma total de los cuadrados
+
+# Calcular R²
+r_squared <- 1 - (ss_residual / ss_total)
+print(paste("El R² es:", r_squared))
+```
+
+
+## 4.3 Modelo LASSO
+
+```{r}
+#Entrenar el modelo
+modelo_lasso <- glmnet(X_train, y_train, alpha = 1, standardize = F) #alpha 1 es Lasso y alpha 0 es Ridge
+
+# aplicamos la función tidy para obtener los coeficientes del modelo                 
+lasso_coef = modelo_lasso %>% tidy() %>% arrange(step)
+lasso_coef 
+```
+
+
+```{r}
+plot(modelo_lasso)
+```
+
+```{r}
+
+# Gráfico de coeficientes en función del lambda con intercepto
+g1 = lasso_coef  %>% 
+  ggplot(., aes(log(lambda), estimate, group=term, color=term)) +
+  geom_line() +
+  theme_bw()  +
+  theme(legend.position = 'none') +
+  labs(title="Lasso con Intercepto",  y="Coeficientes")
+# Gráfico de coeficientes en función del lambda sin intercepto
+g2 = lasso_coef %>% 
+  filter(term!='(Intercept)') %>% 
+  ggplot(., aes(log(lambda), estimate, group=term, color=term)) +
+  geom_line() +
+  theme_bw()  +
+  theme(legend.position = 'none') +
+  labs(title="Lasso sin Intercepto", y="Coeficientes")
+# armamos la grilla con ambos gráficos
+plot_grid(g1,g2)
+
+```
+```{r}
+# Seleccionamos los terminos que sobreviven para valores altos de lambda
+terminos_sobrevientes = lasso_coef %>% 
+  filter(log(lambda)>7, term != "(Intercept)") %>%
+  select(term) %>% 
+  distinct() %>% 
+  pull()
+# Graficamos
+lasso_coef %>% filter(term %in% terminos_sobrevientes) %>% 
+  ggplot(., aes(log(lambda), estimate, group=term, color=term)) +
+  geom_line(size=1) +
+  geom_hline(yintercept = 0, linetype='dashed') +
+  theme_bw() +
+  labs(title="Lasso sin Intercepto", y="Coeficientes", subtitle= "\"Mejores\" variables")
+  
+```
+
+```{r}
+# Validación el modelo Lasso para elegir lambda óptimo
+cv_modelo_lasso <- cv.glmnet(X_train, y_train, alpha = 1, standardize = F)# alpha = 1 para Lasso
+
+
+```
+
+```{r}
+plot(cv_modelo_lasso)
+```
+
+El gráfico nos muestra la media del MSE con su límite superior e inferior y la cantidad de variables que sobreviven para cada valor de lambda.
+
+```{r}
+# Información de CV en dataframe con tidy
+cv_modelo_lasso %>% tidy()
+```
+```{r}
+cv_modelo_lasso %>% glance()
+```
+```{r}
+# Selección lambda óptimo
+lasso_lambda_opt = cv_modelo_lasso$lambda.min
+# Entrenamiento modelo óptimo
+lasso_opt = glmnet(X_train, y_train, alpha = 1, standardize = F, # Estandarizamos
+                   lambda = lasso_lambda_opt)
+# Salida estandar
+lasso_opt
+```
+```{r}
+lasso_opt %>% tidy()
+```
+
+han quedado 14 variables y el modelo explica el 99% de la deviance
+
+```{r}
+# Predecir con el modelo Lasso optimo
+y_pred_lasso <- predict(lasso_opt, X_test)
+
+# Evaluar el modelo Lasso
+mse_lasso <- mean((y_test - y_pred_lasso)^2)
+r2_lasso <- 1 - sum((y_test - y_pred_lasso)^2) / sum((y_test- mean(y_test))^2)
+
+print(paste("MSE Lasso: ", mse_lasso))
+print(paste("R² Lasso: ", r2_lasso))
+
+```
